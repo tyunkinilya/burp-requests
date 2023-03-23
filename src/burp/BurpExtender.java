@@ -5,6 +5,10 @@ import java.awt.datatransfer.*;
 import java.awt.event.*;
 import java.awt.Toolkit;
 import java.io.UnsupportedEncodingException;
+import java.net.URL;
+import java.net.URLDecoder;
+import static java.util.stream.Collectors.*;
+
 import javax.swing.JMenuItem;
 
 import mjson.Json;
@@ -17,6 +21,8 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, Clipboa
 	private final static String SESSION_MENU_ITEM = NAME + " with session object";
 	private final static String[] PYTHON_ESCAPE = new String[256];
 	private final static String SESSION_VAR = "session";
+	// private final static String TAB = "\t";
+	private final static String TAB = "    ";
 
 	static {
 		for (int i = 0x00; i <= 0xFF; i++) PYTHON_ESCAPE[i] = String.format("\\x%02x", i);
@@ -72,20 +78,27 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, Clipboa
 		for (IHttpRequestResponse message : messages) {
 			IRequestInfo ri = helpers.analyzeRequest(message);
 			byte[] req = message.getRequest();
-			String prefix = "burp" + i++ + "_";
+			String prefix = "";
+			if (messages.length > 1) {
+				prefix = "burp" + i++ + "_";
+			}
 			py.append("\n\n").append(prefix).append("url = \"");
-			py.append(escapeQuotes(ri.getUrl().toString()));
+			py.append(escapeQuotes(ri.getUrl().toString().split("\\?")[0]));
 			py.append('"');
+
+			boolean hasParams = processUrlParams(prefix, py, ri.getUrl());
+
 			List<String> headers = ri.getHeaders();
 			boolean cookiesExist = processCookies(prefix, py, headers);
-			py.append('\n').append(prefix).append("headers = {");
+			py.append('\n').append(prefix).append("headers = {\n\t");
 			processHeaders(py, headers);
-			py.append('}');
+			py.append("\n}");
 			BodyType bodyType = processBody(prefix, py, req, ri);
 			py.append(requestsMethodPrefix);
 			py.append(ri.getMethod().toLowerCase());
-			py.append('(').append(prefix).append("url, headers=");
-			py.append(prefix).append("headers");
+			py.append('(').append(prefix).append("url");
+			if (hasParams) py.append(", params=").append(prefix).append("params");
+			py.append(", headers=").append(prefix).append("headers");
 			if (cookiesExist) py.append(", cookies=").append(prefix).append("cookies");
 			if (bodyType != null) {
 				String kind = bodyType.toString().toLowerCase();
@@ -98,6 +111,46 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, Clipboa
 			.setContents(new StringSelection(py.toString()), this);
 	}
 
+	private boolean processUrlParams(String prefix, StringBuilder py,
+			URL url) {
+		String urlQuery = url.getQuery();
+		if (urlQuery != null && urlQuery.length() > 0) {
+			py.append('\n').append(prefix).append("params = {");
+			Map<String, List<String>> urlParams = splitQuery(url.getQuery());
+			
+			for (Map.Entry<String, List<String>> entry : urlParams.entrySet()) {
+				py.append("\n\t");
+				escapeString(entry.getKey(), py);
+				py.append(": ");
+				List<String> value = entry.getValue();
+				if (value.size() == 1) {
+					String vvalue = value.get(0);
+					if (vvalue == null) {
+						py.append("\"\"");
+					} else {
+						escapeString(vvalue, py);
+					}
+				} else {
+					py.append("[");
+					for (String v : value) {
+						py.append("\n\t\t");
+						if (v == null) {
+							py.append("\"\"");
+						} else {
+							escapeString(v, py);
+						}
+						py.append(",");
+					}
+					py.append("\n\t]");
+				}
+				py.append(",");
+			}
+			py.append("\n}");
+			return true;
+		}
+		return false;		
+	}
+
 	private static boolean processCookies(String prefix, StringBuilder py,
 			List<String> headers) {
 		ListIterator<String> iter = headers.listIterator();
@@ -108,10 +161,10 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, Clipboa
 			iter.remove();
 			for (String cookie : header.substring(8).split("; ?")) {
 				if (cookiesExist) {
-					py.append(", \"");
+					py.append(",\n\t\"");
 				} else {
 					cookiesExist = true;
-					py.append('\n').append(prefix).append("cookies = {\"");
+					py.append('\n').append(prefix).append("cookies = {\n\t\"");
 				}
 				String[] parts = cookie.split("=", 2);
 				py.append(escapeQuotes(parts[0]));
@@ -120,7 +173,7 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, Clipboa
 				py.append('"');
 			}
 		}
-		if (cookiesExist) py.append('}');
+		if (cookiesExist) py.append("\n}");
 		return cookiesExist;
 	}
 
@@ -141,7 +194,7 @@ header_loop:
 				firstHeader = false;
 				py.append('"');
 			} else {
-				py.append(", \"");
+				py.append(",\n\t\"");
 			}
 			py.append(header, 0, colonPos);
 			py.append("\": \"");
@@ -159,8 +212,8 @@ header_loop:
 		if (contentType == IRequestInfo.CONTENT_TYPE_JSON) {
 			try {
 				Json root = Json.read(byteSliceToString(req, bo, req.length));
-				py.append("json=");
-				escapeJson(root, py);
+				py.append("json = ");
+				escapeJson(root, py, 1);
 				return BodyType.JSON;
 			} catch (Exception e) {
 				// not valid JSON, treat it like any other kind of data
@@ -176,7 +229,7 @@ header_loop:
 				if (keyEnd == -1) {
 					if (b == (byte)'=') {
 						if (pos == req.length - 1) {
-							if (!firstKey) py.append(", ");
+							if (!firstKey) py.append(",\n\t");
 							escapeUrlEncodedBytes(req, py, keyStart, pos);
 							py.append(": ''");
 						} else {
@@ -184,7 +237,7 @@ header_loop:
 						}
 					}
 				} else if (b == (byte)'&' || pos == req.length - 1) {
-					if (firstKey) firstKey = false; else py.append(", ");
+					if (firstKey) firstKey = false; else py.append(",\n\t");
 					escapeUrlEncodedBytes(req, py, keyStart, keyEnd);
 					py.append(": ");
 					escapeUrlEncodedBytes(req, py, keyEnd + 1,
@@ -217,31 +270,40 @@ header_loop:
 
 	private static final String PYTHON_TRUE = "True", PYTHON_FALSE = "False", PYTHON_NULL = "None";
 
-	private static void escapeJson(Json node, StringBuilder output) {
+	private static String repeat(int count, String with) {
+		String result = "";
+		
+		for (int i = 0; i < count; i++) {
+			result += with;
+		}
+		return result;
+	}
+
+	private static void escapeJson(Json node, StringBuilder output, Integer depth) {
 		if (node.isObject()) {
-			output.append('{');
+			output.append("{\n" + repeat(depth, TAB));
 			Map<String, Json> tm = new TreeMap(String.CASE_INSENSITIVE_ORDER);
 			tm.putAll(node.asJsonMap());
 			final Iterator<Map.Entry<String, Json>> iter = tm.entrySet().iterator();
 			if (iter.hasNext()) {
-				appendIteratedEntry(iter, output);
+				appendIteratedEntry(iter, output, depth);
 				while (iter.hasNext()) {
-					output.append(", ");
-					appendIteratedEntry(iter, output);
+					output.append(",\n" + repeat(depth, TAB));
+					appendIteratedEntry(iter, output, depth);
 				}
 			}
-			output.append('}');
+			output.append("\n" + repeat(depth-1, TAB) + "}");
 		} else if (node.isArray()) {
-			output.append('[');
+			output.append("[\n" + repeat(depth, TAB));
 			final Iterator<Json> iter = node.asJsonList().iterator();
 			if (iter.hasNext()) {
-				escapeJson(iter.next(), output);
+				escapeJson(iter.next(), output, depth+1);
 				while (iter.hasNext()) {
-					output.append(", ");
-					escapeJson(iter.next(), output);
+					output.append(",\n" + repeat(depth, TAB));
+					escapeJson(iter.next(), output, depth+1);
 				}
 			}
-			output.append(']');
+			output.append("\n" + repeat(depth-1, TAB) + "]");
 		} else if (node.isString()) {
 			escapeString(node.asString(), output);
 		} else if (node.isBoolean()) {
@@ -253,11 +315,11 @@ header_loop:
 		}
 	}
 
-	private static void appendIteratedEntry(Iterator<Map.Entry<String, Json>> iter, StringBuilder output) {
+	private static void appendIteratedEntry(Iterator<Map.Entry<String, Json>> iter, StringBuilder output, Integer depth) {
 		final Map.Entry<String, Json> e = iter.next();
 		escapeString(e.getKey(), output);
 		output.append(": ");
-		escapeJson(e.getValue(), output);
+		escapeJson(e.getValue(), output, depth+1);
 	}
 
 	private static String byteSliceToString(byte[] input, int from, int till) {
@@ -285,6 +347,65 @@ header_loop:
 		}
 		output.append('"');
 	}
+
+	private static Map<String, List<String>> splitQuery(String query) {
+        if (query == null || query.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        return Arrays.stream(query.split("&"))
+                    .map(p -> splitQueryParameter(p))
+                    .collect(groupingBy(e -> e.get0(), // group by parameter name
+                            mapping(e -> e.get1(), toList())));// keep parameter values and assemble into list
+    }
+
+    private static Pair<String, String> splitQueryParameter(String parameter) {
+        final String enc = "UTF-8";
+        List<String> keyValue = Arrays.stream(parameter.split("="))
+                .map(e -> {
+                    try {
+                        return URLDecoder.decode(e, enc);
+                    } catch (UnsupportedEncodingException ex) {
+                        throw new RuntimeUnsupportedEncodingException(ex);
+                    }
+                }).collect(toList());
+
+        if (keyValue.size() == 2) {
+            return new Pair(keyValue.get(0), keyValue.get(1));
+        } else {
+            return new Pair(keyValue.get(0), null);
+        }
+    }
+
+    /** Runtime exception (instead of checked exception) to denote unsupported enconding */
+    public static class RuntimeUnsupportedEncodingException extends RuntimeException {
+        public RuntimeUnsupportedEncodingException(Throwable cause) {
+            super(cause);
+        }
+    }
+
+    /**
+     * A simple pair of two elements
+     * @param <U> first element
+     * @param <V> second element
+     */
+    public static class Pair<U, V> {
+        U a;
+        V b;
+
+        public Pair(U u, V v) {
+            this.a = u;
+            this.b = v;
+        }
+
+        public U get0() {
+            return a;
+        }
+
+        public V get1() {
+            return b;
+        }
+    }
 
 	@Override
 	public void lostOwnership(Clipboard aClipboard, Transferable aContents) {}
