@@ -1,4 +1,4 @@
-Copy as requests plugin for Burp Suite
+Copy as (json-formatted) requests plugin for Burp Suite
 ======================================
 
 Copies selected request(s) as Python [requests][1] invocation.
