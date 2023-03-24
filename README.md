@@ -25,6 +25,8 @@ except for the [Mjson library][3], where
 > off from other projects and credit and licensing notices are included
 > in the appropriate places. The license is Apache 2.0.
 
+Url params parser is taken from this [StackOverflow response][4]
+
   [1]: http://docs.python-requests.org/
   [2]: https://mvnrepository.com/artifact/net.portswigger.burp.extender/burp-extender-api
   [3]: https://bolerio.github.io/mjson/
