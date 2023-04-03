@@ -16,6 +16,7 @@ import mjson.Json;
 public class BurpExtender implements IBurpExtender, IContextMenuFactory, ClipboardOwner
 {
 	private IExtensionHelpers helpers;
+	private IBurpExtenderCallbacks callbacks;
 
 	private final static String NAME = "Copy as requests";
 	private final static String SESSION_MENU_ITEM = NAME + " with session object";
@@ -40,6 +41,7 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, Clipboa
 		helpers = callbacks.getHelpers();
 		callbacks.setExtensionName(NAME);
 		callbacks.registerContextMenuFactory(this);
+		this.callbacks = callbacks;
 	}
 
 	@Override
@@ -100,7 +102,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory, Clipboa
 			if (hasParams) py.append(", params=").append(prefix).append("params");
 			py.append(", headers=").append(prefix).append("headers");
 			if (cookiesExist) py.append(", cookies=").append(prefix).append("cookies");
-			if (bodyType != null) {
+			if (bodyType == BodyType.JSON) {
+				py.append(", ").append("json").append('=').append(prefix).append("json_data");
+			} else if ( bodyType != null ) {
 				String kind = bodyType.toString().toLowerCase();
 				py.append(", ").append(kind).append('=').append(prefix).append(kind);
 			}
@@ -209,44 +213,60 @@ header_loop:
 		if (bo >= req.length - 2) return null;
 		py.append('\n').append(prefix);
 		byte contentType = ri.getContentType();
+		
 		if (contentType == IRequestInfo.CONTENT_TYPE_JSON) {
 			try {
 				Json root = Json.read(byteSliceToString(req, bo, req.length));
-				py.append("json = ");
+				py.append("json_data = ");
 				escapeJson(root, py, 1);
 				return BodyType.JSON;
 			} catch (Exception e) {
 				// not valid JSON, treat it like any other kind of data
+				callbacks.printOutput(e.getMessage());
 			}
 		}
 		py.append("data = ");
+		
 		if (contentType == IRequestInfo.CONTENT_TYPE_URL_ENCODED) {
-			py.append('{');
-			boolean firstKey = true;
-			int keyStart = bo, keyEnd = -1;
-			for (int pos = bo; pos < req.length; pos++) {
-				byte b = req[pos];
-				if (keyEnd == -1) {
-					if (b == (byte)'=') {
-						if (pos == req.length - 1) {
-							if (!firstKey) py.append(",\n\t");
-							escapeUrlEncodedBytes(req, py, keyStart, pos);
-							py.append(": ''");
-						} else {
-							keyEnd = pos;
+			try {
+				StringBuilder body_sb = new StringBuilder("");
+				body_sb.append('{');
+				boolean firstKey = true;
+				int keyStart = bo, keyEnd = -1;
+				for (int pos = bo; pos < req.length; pos++) {
+					byte b = req[pos];
+					if (keyEnd == -1) {
+						if (b == (byte)'=') {
+							if (pos == req.length - 1) {
+								if (!firstKey) body_sb.append(",\n\t");
+								escapeUrlEncodedBytes(req, body_sb, keyStart, pos);
+								body_sb.append(": ''");
+							} else {
+								keyEnd = pos;
+							}
 						}
+					} else if (b == (byte)'&' || pos == req.length - 1) {
+						if (firstKey) firstKey = false; else body_sb.append(",\n\t");
+						escapeUrlEncodedBytes(req, body_sb, keyStart, keyEnd);
+						body_sb.append(": ");
+						escapeUrlEncodedBytes(req, body_sb, keyEnd + 1,
+								pos == req.length - 1 ? req.length : pos);
+						keyEnd = -1;
+						keyStart = pos + 1;
 					}
-				} else if (b == (byte)'&' || pos == req.length - 1) {
-					if (firstKey) firstKey = false; else py.append(",\n\t");
-					escapeUrlEncodedBytes(req, py, keyStart, keyEnd);
-					py.append(": ");
-					escapeUrlEncodedBytes(req, py, keyEnd + 1,
-							pos == req.length - 1 ? req.length : pos);
-					keyEnd = -1;
-					keyStart = pos + 1;
 				}
+				body_sb.append('}');
+
+				if (body_sb.length() == 2) {
+					escapeBytes(req, py, bo, req.length);
+				} else {
+					py.append(body_sb.toString());
+				}
+			} catch (Exception e) {
+				callbacks.printOutput(e.getMessage());
+				escapeBytes(req, py, bo, req.length);
 			}
-			py.append('}');
+
 		} else {
 			escapeBytes(req, py, bo, req.length);
 		}
@@ -341,7 +361,7 @@ header_loop:
 
 	private static void escapeBytes(byte[] input, StringBuilder output,
 			int start, int end) {
-		output.append('"');
+		output.append("b\"");
 		for (int pos = start; pos < end; pos++) {
 			output.append(PYTHON_ESCAPE[input[pos] & 0xFF]);
 		}
